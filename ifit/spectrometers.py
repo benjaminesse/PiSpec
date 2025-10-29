@@ -55,7 +55,7 @@ class Spectrometer():
         Controls nonlinearity correction onboard the spectrometer
     """
 
-    def __init__(self, serial=None, integration_time=100, coadds=10,
+    def __init__(self, serial=None, integration_time=100, coadds=1,
                  correct_dark_counts=True, correct_nonlinearity=True):
         """Initialize."""
         # Connect to the spectrometer
@@ -128,7 +128,11 @@ class Spectrometer():
 
         # Get the spectrum timestamp
         if gps is not None:
-            timestamp = datetime.combine(gps.datestamp, gps.timestamp)
+            if gps.datestamp is None or gps.timestamp is None:
+                timestamp = datetime.now()
+                logger.warning('No GPS, using system time')
+            else:
+                timestamp = datetime.combine(gps.datestamp, gps.timestamp)
         else:
             timestamp = datetime.now()
 

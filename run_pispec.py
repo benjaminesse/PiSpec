@@ -1,8 +1,8 @@
-"""Control Script for the PiSpec."""
+from __future__ import division
 import os
 import sys
 import utm
-# import time
+import time
 import yaml
 import serial
 import logging
@@ -10,6 +10,10 @@ import numpy as np
 from datetime import datetime
 import serial.tools.list_ports
 from multiprocessing import Process, Queue
+import threading
+
+from pymavlink import mavutil
+os.environ['MAVLINK20'] = '1'
 
 from ifit.spectrometers import Spectrometer
 from ifit.gps import GPS
@@ -18,39 +22,49 @@ from ifit.parameters import Parameters
 from ifit.spectral_analysis import Analyser
 
 
-def analyse_spec(spec_fname, analyser, fpath, q):
+def analyse_spec(spec_fname, analyser, fpath, q1, q2):
     """."""
     # Read in the spectrum
     x, y, info, err = read_spectrum(spec_fname, spec_type='iFit')
 
     # Fit the spectrum
-    fit = analyser.fit_spectrum(spectrum=[x, y],
-                                update_params=True,
-                                resid_limit=20,
-                                int_limit=[0, 60000],
-                                interp_method='linear')
+    fit = analyser.fit_spectrum(
+        spectrum=[x, y],
+        update_params=True,
+        resid_limit=20,
+        int_limit=[0, 60000],
+        prefit_shift=1,
+        interp_method='linear'
+    )
 
     # Convert lat/lon to UTM
     utm_coords = utm.from_latlon(info['lat'], info['lon'])
 
     # Colate results and add to the queue
     conv = 2.54e15
-    res = [info['timestamp'], info['lat'], info['lon'], info['alt'],
-           utm_coords[0], utm_coords[1], utm_coords[2], utm_coords[3],
-           fit.params['SO2'].fit_val, fit.params['SO2'].fit_err,
-           fit.params['SO2'].fit_val/conv, fit.params['SO2'].fit_err/conv,
-           info['integration_time'], np.max(fit.spec)]
+    res = [
+        info['timestamp'], info['lat'], info['lon'], info['alt'],
+        utm_coords[0], utm_coords[1], utm_coords[2], utm_coords[3],
+        fit.params['SO2'].fit_val, fit.params['SO2'].fit_err,
+        fit.params['SO2'].fit_val/conv, fit.params['SO2'].fit_err/conv,
+        info['integration_time'], np.max(fit.spec)
+    ]
+
+    # To send results over telemetry use the following
+    # mav_connection.mav.named_value_float_send(
+    #     int(time.mktime(info['timestamp'].timetuple())),
+    #     'So2_SCD'.encode('utf-8'),
+    #     fit.params['SO2'].fit_val/conv
+    # )
 
     head, tail = os.path.split(spec_fname)
     meas_fname = f"{head}/meas/{tail.replace('spectrum', 'meas')}"
 
-    with open(meas_fname, 'w') as w:
-        for r in res:
-            w.write(f'{r},')
-    q.put(res)
+    q1.put(res)
+    q2.put([info['timestamp'], fit.params['SO2'].fit_val/conv])
 
 
-def listener(q, save_fname):
+def listener(q1, save_fname):
     """."""
     # Handle writing the results file
     with open(save_fname, 'w') as w:
@@ -63,7 +77,7 @@ def listener(q, save_fname):
 
         while True:
             # Unpack the results
-            res = q.get()
+            res = q1.get()
             if res == 'kill':
                 break
             else:
@@ -72,8 +86,48 @@ def listener(q, save_fname):
                     msg += f',{r}'
                 w.write(msg + '\n')
                 w.flush()
-                print(f'{res[0]}\t{res[1]}\t{res[2]}\t{res[3]}\t{res[10]}\t'
-                      + f'{res[11]}')
+                print(
+                    f'{res[0]}\t{res[1]}\t{res[2]}\t{res[3]}\t{res[10]}\t'
+                    f'{res[11]}'
+                )
+
+
+def mavlink_listener(q2, mav_connection):
+
+    conv = 2.54e15
+
+    while True:
+
+        res = [q2.get() for _ in range(100) if not q2.empty()]
+
+        if len(res) != 0:
+
+            so2_vals = [r[1] for r in res]
+            timestamp = [r[0] for r in res]
+            so2_val = np.nanmean(so2_vals)
+
+            mav_connection.mav.named_value_float_send(
+                int(time.mktime(timestamp[-1].timetuple())),
+                'So2_SCD'.encode('utf-8'),
+                so2_val
+            )
+
+        time.sleep(0.5)
+
+
+def heartbeat_thread(conn, timeout=2):
+    """Send heartbeats to router"""
+    while True:
+        conn.mav.heatbeat_send(
+            mavutil.mavlink.MAV_TYPE_GCS,
+            mavutil.mavlink.MAV_AUTOPILOT_INVALID,
+            0, 0, 0
+        )
+        conn.mav.ping_send(
+            0, 1, 126, 0
+        )
+        time.sleep(timeout)
+    threads.remove(threading.current_thread())
 
 
 # =============================================================================
@@ -122,6 +176,23 @@ def run():
     # Connect to the GPS
     ports = serial.tools.list_ports.comports()
     gps = GPS(ports[config['GPSCOMPort']].device)
+
+    # Connect to MAVLINK
+    connection_string = '/dev/serial0'
+    mav_connection = mavutil.mavlink_connection(
+        '/dev/serial0',
+        baud=115200,
+        source_system=1,
+        source_component=0
+    )
+
+    # Start heartbeat thread
+    hb_thread = threading.Thread(
+        target=heartbeat_thread,
+        name='HB_thread',
+        args=(mav_connection, 5, ),
+        daemon=True
+    )
 
     # Get the timestamp
     nowtime = datetime.strftime(datetime.now(), '%Y%m%d_%H%M%S')
@@ -174,10 +245,16 @@ def run():
 
     # Generate the writing queue
     save_fname = f'{fpath}/so2_output.csv'
-    q = Queue()
-    listen = Process(target=listener, args=[q, save_fname])
-    listen.daemon = True
-    listen.start()
+    q1 = Queue()
+    listen1 = Process(target=listener, args=[q1, save_fname])
+    listen1.daemon = True
+    listen1.start()
+
+    # Generate the mavlink queue
+    q2 = Queue()
+    listen2 = Process(target=mavlink_listener, args=[q2, mav_connection])
+    listen2.daemon = True
+    listen2.start()
 
     # Start switched OFF
     control_file = 'controlON'
@@ -220,11 +297,13 @@ def run():
             # Clear any finished processes from the processes list
             processes = [p for p in processes if p.is_alive()]
 
-            if len(processes) < 3:
+            if len(processes) < 1:
 
                 # Create new process to handle fitting of the last scan
-                p = Process(target=analyse_spec,
-                            args=[spec_fname, analyser, fpath, q])
+                p = Process(
+                    target=analyse_spec,
+                    args=[spec_fname, analyser, fpath, q1, q2]
+                )
 
                 # Add to array of active processes
                 processes.append(p)
@@ -234,18 +313,19 @@ def run():
 
             else:
                 # Log that the process was not started
-                logger.warning('Too many processes! Spectrum {i} not analysed')
+                logger.warning(f'Too many processes! Spectrum {i} not analysed')
 
             i += 1
 
         except KeyboardInterrupt:
-            q.put('kill')
+            q1.put('kill')
             break
 
     logger.info('Program ended')
 
     # Complete processes
-    listen.join()
+    listen1.join()
+    listen2.join()
     for p in processes:
         p.join()
 
