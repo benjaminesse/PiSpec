@@ -11,6 +11,8 @@ from datetime import datetime
 import serial.tools.list_ports
 from multiprocessing import Process, Queue
 import threading
+from pathlib import Path
+from ifit.dark_manager import acquire_startup_darks, load_dark_library
 
 from pymavlink import mavutil
 os.environ['MAVLINK20'] = '1'
@@ -173,6 +175,35 @@ def run():
     # Connect to the spectrometer
     spectro = Spectrometer()
 
+    # --- Build the integration-time grid from YAML ---
+    min_it  = int(config.get('MinIntTime', 50))
+    max_it  = int(config.get('MaxIntTime', 300))
+    it_step = int(config.get('IntTimeStep', 10))
+
+    int_time_grid = list(range(min_it, max_it + 1, it_step))
+
+    # --- Acquire or load darks on boot ---
+    DARK_DIR = Path("/home/pi/PiSpec/Dark")   # persistent directory on the Pi
+
+    try:
+        # Acquire fresh darks on startup (lens cap / shutter closed!)
+        dark_lib = acquire_startup_darks(
+            spectro,
+            out_dir=DARK_DIR,
+            times_ms=int_time_grid,
+            coadds=1   # exactly one dark per integration time (your request)
+        )
+        logging.info("Startup dark acquisition complete at %s", int_time_grid)
+    except Exception as e:
+        logging.exception("Dark acquisition failed: %s; trying to load existing index", e)
+        dark_lib = load_dark_library(spectro, DARK_DIR)
+
+    if not getattr(dark_lib, "darks", None):
+        logging.warning("Dark library is empty. Proceeding WITHOUT dark subtraction.")
+    else:
+        logging.info("Dark library contains %d entries.", len(dark_lib.darks))
+
+
     # Connect to the GPS
     ports = serial.tools.list_ports.comports()
     gps = GPS(ports[config['GPSCOMPort']].device)
@@ -271,48 +302,75 @@ def run():
         #     continue
 
         try:
-
-            # Format the spectrum name and read
+            # ------------------------------------------------------------
+            # Acquire spectrum to file + memory (unchanged behaviour)
+            # ------------------------------------------------------------
             spec_fname = f'{fpath}/spectrum_{i:05d}.txt'
-            [x, y], info = spectro.get_spectrum(spec_fname, gps=gps)
+            [x, y], info = spectro.get_spectrum(spec_fname, gps=gps)  # y = raw counts
 
-            # Find the maximum intensity
+            # ------------------------------------------------------------
+            # DARK SUBTRACTION (NEW): overwrite file with corrected data
+            # ------------------------------------------------------------
+            try:
+                if dark_lib and getattr(dark_lib, "darks", None):
+                    spec = np.vstack([x, y])
+                    spec_corr = dark_lib.subtract(
+                        spectrum=spec,
+                        integration_time_ms=spectro.integration_time,
+                        clip_floor=0.0,    # keep non-negative; set None to disable
+                    )
+                    x = spec_corr[0, :]
+                    y = spec_corr[1, :]
+
+                    # Re-save the spectrum file with corrected counts
+                    header = (
+                        "PiSpec spectrum (dark-corrected)\n"
+                        f"Integration time (ms): {spectro.integration_time}\n"
+                        "Wavelength (nm),Intensity (arb)"
+                    )
+                    np.savetxt(
+                        spec_fname,
+                        np.column_stack([x, y]),
+                        header=header
+                    )
+                else:
+                    logger.warning("Dark library empty; saving raw spectrum.")
+            except Exception as e:
+                logger.exception("Dark subtraction failed (IT=%d ms): %s",
+                                getattr(spectro, "integration_time", -1), e)
+                # leave y as raw; file already contains raw counts from get_spectrum
+
+            # ------------------------------------------------------------
+            # AUTO-EXPOSURE: use dark-corrected max intensity
+            # ------------------------------------------------------------
             max_int = np.max(y)
+            scale = target_int / max_int if max_int > 0 else 1.0
 
-            # Scale the intensity to the target
-            scale = target_int / max_int
-
-            # Scale the integration time by this factor
+            # Proposed new integration time
             int_time = spectro.integration_time * scale
 
-            # Find the nearest value
-            diff = ((int_times - int_time)**2)**0.5
-            idx = np.where(diff == min(diff))[0][0]
+            # Snap to the nearest allowed integration time from int_times
+            diff = np.abs(int_times - int_time)
+            idx = int(np.argmin(diff))
             new_int_time = int(int_times[idx])
 
-            # Update the integration time
+            # Update integration time if needed
             if new_int_time != spectro.integration_time:
                 spectro.update_integration_time(new_int_time)
 
-            # Clear any finished processes from the processes list
+            # ------------------------------------------------------------
+            # Spawn analysis process (unchanged)
+            # ------------------------------------------------------------
             processes = [p for p in processes if p.is_alive()]
 
             if len(processes) < 1:
-
-                # Create new process to handle fitting of the last scan
                 p = Process(
                     target=analyse_spec,
                     args=[spec_fname, analyser, fpath, q1, q2]
                 )
-
-                # Add to array of active processes
                 processes.append(p)
-
-                # Begin the process
                 p.start()
-
             else:
-                # Log that the process was not started
                 logger.warning(f'Too many processes! Spectrum {i} not analysed')
 
             i += 1
@@ -320,6 +378,7 @@ def run():
         except KeyboardInterrupt:
             q1.put('kill')
             break
+
 
     logger.info('Program ended')
 
