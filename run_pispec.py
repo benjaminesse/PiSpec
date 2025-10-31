@@ -150,6 +150,13 @@ def run():
     stdout_handler.setFormatter(stdout_formatter)
     logger.addHandler(stdout_handler)
 
+    # Get the timestamp
+    nowtime = datetime.strftime(datetime.now(), '%Y%m%d_%H%M%S')
+    # Create the results folder
+    fpath = f'/home/pi/PiSpec/Results/{nowtime}'
+    if not os.path.isdir(fpath):
+        os.makedirs(fpath)
+
     # Read in settings
     default_config = {'TargetIntensity': 50000,
                       'MinIntTime': 50,
@@ -183,7 +190,7 @@ def run():
     int_time_grid = list(range(min_it, max_it + 1, it_step))
 
     # --- Acquire or load darks on boot ---
-    DARK_DIR = Path("/home/pi/PiSpec/Dark")   # persistent directory on the Pi
+    DARK_DIR = Path(f'{fpath}/Dark')   # persistent directory on the Pi
 
     try:
         # Acquire fresh darks on startup (lens cap / shutter closed!)
@@ -223,14 +230,6 @@ def run():
         args=(mav_connection, 5, ),
         daemon=True
     )
-
-    # Get the timestamp
-    nowtime = datetime.strftime(datetime.now(), '%Y%m%d_%H%M%S')
-
-    # Create the results folder
-    fpath = f'/home/pi/PiSpec/Results/{nowtime}'
-    if not os.path.isdir(fpath):
-        os.makedirs(fpath)
 
     if not os.path.isdir(f'{fpath}/meas'):
         os.makedirs(f'{fpath}/meas')
