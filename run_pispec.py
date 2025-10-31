@@ -203,7 +203,6 @@ def run():
     else:
         logging.info("Dark library contains %d entries.", len(dark_lib.darks))
 
-
     # Connect to the GPS
     ports = serial.tools.list_ports.comports()
     gps = GPS(ports[config['GPSCOMPort']].device)
@@ -302,75 +301,48 @@ def run():
         #     continue
 
         try:
-            # ------------------------------------------------------------
-            # Acquire spectrum to file + memory (unchanged behaviour)
-            # ------------------------------------------------------------
+
+            # Format the spectrum name and read
             spec_fname = f'{fpath}/spectrum_{i:05d}.txt'
-            [x, y], info = spectro.get_spectrum(spec_fname, gps=gps)  # y = raw counts
+            [x, y], info = spectro.get_spectrum(spec_fname, gps=gps)
 
-            # ------------------------------------------------------------
-            # DARK SUBTRACTION (NEW): overwrite file with corrected data
-            # ------------------------------------------------------------
-            try:
-                if dark_lib and getattr(dark_lib, "darks", None):
-                    spec = np.vstack([x, y])
-                    spec_corr = dark_lib.subtract(
-                        spectrum=spec,
-                        integration_time_ms=spectro.integration_time,
-                        clip_floor=0.0,    # keep non-negative; set None to disable
-                    )
-                    x = spec_corr[0, :]
-                    y = spec_corr[1, :]
-
-                    # Re-save the spectrum file with corrected counts
-                    header = (
-                        "PiSpec spectrum (dark-corrected)\n"
-                        f"Integration time (ms): {spectro.integration_time}\n"
-                        "Wavelength (nm),Intensity (arb)"
-                    )
-                    np.savetxt(
-                        spec_fname,
-                        np.column_stack([x, y]),
-                        header=header
-                    )
-                else:
-                    logger.warning("Dark library empty; saving raw spectrum.")
-            except Exception as e:
-                logger.exception("Dark subtraction failed (IT=%d ms): %s",
-                                getattr(spectro, "integration_time", -1), e)
-                # leave y as raw; file already contains raw counts from get_spectrum
-
-            # ------------------------------------------------------------
-            # AUTO-EXPOSURE: use dark-corrected max intensity
-            # ------------------------------------------------------------
+            # Find the maximum intensity
             max_int = np.max(y)
-            scale = target_int / max_int if max_int > 0 else 1.0
 
-            # Proposed new integration time
+            # Scale the intensity to the target
+            scale = target_int / max_int
+
+            # Scale the integration time by this factor
             int_time = spectro.integration_time * scale
 
-            # Snap to the nearest allowed integration time from int_times
-            diff = np.abs(int_times - int_time)
-            idx = int(np.argmin(diff))
+            # Find the nearest value
+            diff = ((int_times - int_time)**2)**0.5
+            idx = np.where(diff == min(diff))[0][0]
             new_int_time = int(int_times[idx])
 
-            # Update integration time if needed
+            # Update the integration time
             if new_int_time != spectro.integration_time:
                 spectro.update_integration_time(new_int_time)
 
-            # ------------------------------------------------------------
-            # Spawn analysis process (unchanged)
-            # ------------------------------------------------------------
+            # Clear any finished processes from the processes list
             processes = [p for p in processes if p.is_alive()]
 
             if len(processes) < 1:
+
+                # Create new process to handle fitting of the last scan
                 p = Process(
                     target=analyse_spec,
                     args=[spec_fname, analyser, fpath, q1, q2]
                 )
+
+                # Add to array of active processes
                 processes.append(p)
+
+                # Begin the process
                 p.start()
+
             else:
+                # Log that the process was not started
                 logger.warning(f'Too many processes! Spectrum {i} not analysed')
 
             i += 1
@@ -378,7 +350,6 @@ def run():
         except KeyboardInterrupt:
             q1.put('kill')
             break
-
 
     logger.info('Program ended')
 

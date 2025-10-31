@@ -7,7 +7,6 @@ Features:
   - Save each dark as CSV and a compact NPZ index for fast lookup
   - Load cached darks on startup
   - Return the exact-match dark for a given integration time (or nearest)
-  - Subtract the dark from a measured spectrum safely (wavelength check + interp)
 """
 
 from __future__ import annotations
@@ -101,51 +100,6 @@ class DarkLibrary:
             self.save()
         else:
             logger.warning("No darks acquired.")
-
-    # ------------- Access & subtraction -------------
-
-    def get(self, integration_time_ms: int, *, nearest_ok: bool = False
-            ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
-        it = int(integration_time_ms)
-        if it in self.darks:
-            return self.darks[it]
-        if not nearest_ok or not self.darks:
-            return None
-        # choose nearest time
-        keys = np.array(sorted(self.darks.keys()), dtype=int)
-        idx = int(np.argmin(np.abs(keys - it)))
-        nearest = int(keys[idx])
-        logger.warning("Exact dark for %sms not found; using nearest %sms", it, nearest)
-        return self.darks[nearest]
-
-    def subtract(self, spectrum: np.ndarray, integration_time_ms: int,
-                 *, clip_floor: float | None = 0.0) -> np.ndarray:
-        """
-        Subtract appropriate dark spectrum from a [2 x N] spectrum array.
-        Returns a new 2xN array [wavelengths; corrected_intensities].
-        """
-        if spectrum is None or spectrum.ndim != 2 or spectrum.shape[0] != 2:
-            raise ValueError("Spectrum must be 2xN array [wavelengths; intensities]")
-
-        wl_meas = spectrum[0, :]
-        y_meas = spectrum[1, :].astype(float, copy=True)
-
-        dark = self.get(integration_time_ms, nearest_ok=False)
-        if dark is None:
-            raise KeyError(f"No dark available for {integration_time_ms} ms")
-        wl_dark, y_dark = dark
-
-        # If wavelengths differ slightly, interpolate dark onto measurement grid
-        if wl_dark.shape != wl_meas.shape or not np.allclose(wl_dark, wl_meas, rtol=0, atol=1e-6):
-            y_dark_interp = np.interp(wl_meas, wl_dark, y_dark)
-        else:
-            y_dark_interp = y_dark
-
-        y_corr = y_meas - y_dark_interp
-        if clip_floor is not None:
-            y_corr = np.maximum(y_corr, clip_floor)
-        return np.vstack([wl_meas, y_corr])
-
 
 # -------- Convenience helpers for run_pispec.py --------
 
