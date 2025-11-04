@@ -6,13 +6,14 @@ import time
 import yaml
 import serial
 import logging
+import threading
+import subprocess
 import numpy as np
+from pathlib import Path
 from datetime import datetime
 import serial.tools.list_ports
 from multiprocessing import Process, Queue
-import threading
-from pathlib import Path
-from ifit.dark_manager import acquire_startup_darks, load_dark_library
+# from gpiozero import DigitalInputDevice
 
 from pymavlink import mavutil
 os.environ['MAVLINK20'] = '1'
@@ -22,6 +23,9 @@ from ifit.gps import GPS
 from ifit.load_spectra import read_spectrum
 from ifit.parameters import Parameters
 from ifit.spectral_analysis import Analyser
+from ifit.dark_manager import acquire_startup_darks, load_dark_library
+
+logger = logging.getLogger()
 
 
 def analyse_spec(spec_fname, analyser, fpath, q1, q2):
@@ -60,7 +64,7 @@ def analyse_spec(spec_fname, analyser, fpath, q1, q2):
     # )
 
     head, tail = os.path.split(spec_fname)
-    meas_fname = f"{head}/meas/{tail.replace('spectrum', 'meas')}"
+    spectra_fname = f"{head}/spectra/{tail.replace('spectrum', 'spectra')}"
 
     q1.put(res)
     q2.put([info['timestamp'], fit.params['SO2'].fit_val/conv])
@@ -131,6 +135,30 @@ def heartbeat_thread(conn, timeout=2):
         time.sleep(timeout)
     threads.remove(threading.current_thread())
 
+def gps_time_sync(gps):
+    """Syncs the position and time with the GPS."""
+    logger.info('Starting GPS sync...')
+
+    # Get a fix from the GPS
+    position = gps.get_position(time_to_wait=7200)
+
+    if position is not None:
+        ts, lat, lon, alt = position
+        tstamp = ts.strftime("%Y-%m-%d %H:%M:%S")
+        logger.info(f'Updating system time: {tstamp}')
+        tstr = ts.strftime('%a %b %d %H:%M:%S UTC %Y')
+        subprocess.call(f'sudo date -s "{tstr}"', shell=True)
+
+        # Log the scanner location
+        logger.info(
+            'Scanner position:\n'
+            f'Latitude:   {lat}\n'
+            f'Longitutde: {lon}\n'
+            f'Altitude:   {alt}\n'
+        )
+
+    else:
+        logger.warning('GPS fix failed')
 
 # =============================================================================
 # Run main script
@@ -139,7 +167,6 @@ def heartbeat_thread(conn, timeout=2):
 def run():
     """Run main program loop."""
     # Get the logger
-    logger = logging.getLogger()
 
     # Setup logger to standard output
     logger.setLevel(logging.INFO)
@@ -150,12 +177,41 @@ def run():
     stdout_handler.setFormatter(stdout_formatter)
     logger.addHandler(stdout_handler)
 
+# =============================================================================
+#   Sync with GPS
+# =============================================================================
+
+    # Connect to the GPS
+    # ports = serial.tools.list_ports.comports()
+    gps = GPS()
+    # gps = GPS(ports[config['GPSCOMPort']].device)
+
+    # Set a task to sync the station time and position with the GPS
+    gps_time_sync(gps)
+
     # Get the timestamp
     nowtime = datetime.strftime(datetime.now(), '%Y%m%d_%H%M%S')
+
+# =============================================================================
+#   Connect to the spectrometer
+# =============================================================================
+
+   # Connect to the spectrometer
+    spectro = Spectrometer()
+
+# =============================================================================
+#   Create folders outputs
+# =============================================================================
+
     # Create the results folder
     fpath = f'/home/pi/PiSpec/Results/{nowtime}'
     if not os.path.isdir(fpath):
         os.makedirs(fpath)
+    if not os.path.isdir(f'{fpath}/spectra'):
+        os.makedirs(f'{fpath}/spectra')
+    if not os.path.isdir(f'{fpath}/dark'):
+        os.makedirs(f'{fpath}/dark')
+
 
     # Read in settings
     default_config = {'TargetIntensity': 50000,
@@ -179,8 +235,6 @@ def run():
                           config['MaxIntTime'] + config['IntTimeStep'],
                           config['IntTimeStep'])
 
-    # Connect to the spectrometer
-    spectro = Spectrometer()
 
     # --- Build the integration-time grid from YAML ---
     min_it  = int(config.get('MinIntTime', 50))
@@ -190,7 +244,7 @@ def run():
     int_time_grid = list(range(min_it, max_it + 1, it_step))
 
     # --- Acquire or load darks on boot ---
-    DARK_DIR = Path(f'{fpath}/Dark')   # persistent directory on the Pi
+    DARK_DIR = Path(f'{fpath}/dark')   # persistent directory on the Pi
 
     try:
         # Acquire fresh darks on startup (lens cap / shutter closed!)
@@ -210,10 +264,6 @@ def run():
     else:
         logging.info("Dark library contains %d entries.", len(dark_lib.darks))
 
-    # Connect to the GPS
-    ports = serial.tools.list_ports.comports()
-    gps = GPS(ports[config['GPSCOMPort']].device)
-
     # Connect to MAVLINK
     connection_string = '/dev/serial0'
     mav_connection = mavutil.mavlink_connection(
@@ -231,8 +281,6 @@ def run():
         daemon=True
     )
 
-    if not os.path.isdir(f'{fpath}/meas'):
-        os.makedirs(f'{fpath}/meas')
 
     # Add file handler to logger
     f_handler = logging.FileHandler(f'{fpath}/log.txt')
@@ -302,7 +350,7 @@ def run():
         try:
 
             # Format the spectrum name and read
-            spec_fname = f'{fpath}/spectrum_{i:05d}.txt'
+            spec_fname = f'{fpath}/spectra/spectrum_{i:05d}.txt'
             [x, y], info = spectro.get_spectrum(spec_fname, gps=gps)
 
             # Find the maximum intensity
