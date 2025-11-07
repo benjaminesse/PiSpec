@@ -69,6 +69,57 @@ def analyse_spec(spec_fname, analyser, fpath, q1, q2):
     q1.put(res)
     q2.put([info['timestamp'], fit.params['SO2'].fit_val/conv])
 
+# ------------- MAVLink helpers  ----------------
+def send_status(conn, text, severity=None):
+    """Send a short status string to the GCS (STATUSTEXT, <=50 chars)."""
+    if conn is None:
+        return
+    try:
+        if severity is None:
+            severity = mavutil.mavlink.MAV_SEVERITY_INFO
+        s = str(text)[:50]
+        conn.mav.statustext_send(severity, s.encode('utf-8'))
+    except Exception as e:
+        logger.warning("STATUSTEXT send failed: %s", e)
+
+
+def heartbeat_thread(conn, period=2):
+    """Send heartbeats + pings so the link stays alive."""
+    while True:
+        try:
+            conn.mav.heartbeat_send(
+                mavutil.mavlink.MAV_TYPE_ONBOARD_CONTROLLER,
+                mavutil.mavlink.MAV_AUTOPILOT_INVALID, 0, 0, 0
+            )
+            conn.mav.ping_send(int(time.time()*1e6), 0, 0, 0)
+        except Exception as e:
+            logger.warning("Heartbeat error: %s", e)
+        time.sleep(period)
+
+
+def link_monitor_thread(conn, lost_after=10):
+    """
+    Watch for inbound MAVLink (e.g., GCS heartbeats).
+    If nothing received for 'lost_after' seconds -> LOST.
+    On first message after loss -> RESTORED.
+    """
+    last_rx = time.time()
+    lost = False
+    while True:
+        try:
+            msg = conn.recv_match(blocking=False)
+            if msg is not None:
+                last_rx = time.time()
+                if lost:
+                    send_status(conn, "MAVLink link restored")
+                    lost = False
+            if (time.time() - last_rx) > lost_after and not lost:
+                send_status(conn, "MAVLink link lost", mavutil.mavlink.MAV_SEVERITY_WARNING)
+                lost = True
+        except Exception as e:
+            logger.warning("Link monitor error: %s", e)
+        time.sleep(0.5)
+
 
 def listener(q1, save_fname):
     """."""
@@ -97,10 +148,10 @@ def listener(q1, save_fname):
                     f'{res[11]}'
                 )
 
-
 def mavlink_listener(q2, mav_connection):
 
     conv = 2.54e15
+    last_text = 0  # for optional human-readable throttled messages
 
     while True:
 
@@ -118,25 +169,20 @@ def mavlink_listener(q2, mav_connection):
                 so2_val
             )
 
+            # (Optional) occasional human-readable text to GCS (every 5 s)
+            now = time.time()
+            if now - last_text > 5:
+                try:
+                    send_status(mav_connection, f"SO2_SCD {so2_val:.2e} mol/m^2")
+                except Exception:
+                    pass
+                last_text = now
+
         time.sleep(0.5)
 
-
-def heartbeat_thread(conn, timeout=2):
-    """Send heartbeats to router"""
-    while True:
-        conn.mav.heatbeat_send(
-            mavutil.mavlink.MAV_TYPE_GCS,
-            mavutil.mavlink.MAV_AUTOPILOT_INVALID,
-            0, 0, 0
-        )
-        conn.mav.ping_send(
-            0, 1, 126, 0
-        )
-        time.sleep(timeout)
-    threads.remove(threading.current_thread())
-
+# =============================================================================
 def gps_time_sync(gps):
-    """Syncs the position and time with the GPS."""
+    """Syncs the position and time with the GPS. Returns (ok, lat, lon)."""
     logger.info('Starting GPS sync...')
 
     # Get a fix from the GPS
@@ -156,9 +202,10 @@ def gps_time_sync(gps):
             f'Longitutde: {lon}\n'
             f'Altitude:   {alt}\n'
         )
-
+        return True, lat, lon
     else:
         logger.warning('GPS fix failed')
+        return False, None, None
 
 # =============================================================================
 # Run main script
@@ -178,16 +225,37 @@ def run():
     logger.addHandler(stdout_handler)
 
 # =============================================================================
+#   Connect to MAVLink first so we can report status
+# =============================================================================
+    connection_string = '/dev/serial0'
+    mav_connection = None
+    try:
+        mav_connection = mavutil.mavlink_connection(
+            connection_string,
+            baud=115200,
+            source_system=1,
+            source_component=0
+        )
+        send_status(mav_connection, "MAVLink connected")
+        # Start heartbeat + link monitor threads
+        threading.Thread(target=heartbeat_thread, args=(mav_connection, 2), daemon=True).start()
+        threading.Thread(target=link_monitor_thread, args=(mav_connection, 10), daemon=True).start()
+    except Exception as e:
+        logger.exception("Failed to open MAVLink: %s", e)
+
+# =============================================================================
 #   Sync with GPS
 # =============================================================================
 
     # Connect to the GPS
-    # ports = serial.tools.list_ports.comports()
     gps = GPS()
-    # gps = GPS(ports[config['GPSCOMPort']].device)
 
-    # Set a task to sync the station time and position with the GPS
-    gps_time_sync(gps)
+    # Sync time & position
+    gps_ok, glat, glon = gps_time_sync(gps)
+    if gps_ok:
+        send_status(mav_connection, f"GPS OK {glat:.1f},{glon:.1f}")
+    else:
+        send_status(mav_connection, "GPS fix failed", mavutil.mavlink.MAV_SEVERITY_WARNING)
 
     # Get the timestamp
     nowtime = datetime.strftime(datetime.now(), '%Y%m%d_%H%M%S')
@@ -196,8 +264,13 @@ def run():
 #   Connect to the spectrometer
 # =============================================================================
 
-   # Connect to the spectrometer
-    spectro = Spectrometer()
+    try:
+        spectro = Spectrometer()
+        send_status(mav_connection, "Spectrometer connected")
+    except Exception as e:
+        logger.exception("Spectrometer init failed: %s", e)
+        send_status(mav_connection, "Spectrometer init failed", mavutil.mavlink.MAV_SEVERITY_ERROR)
+        return
 
 # =============================================================================
 #   Create folders outputs
@@ -211,6 +284,13 @@ def run():
         os.makedirs(f'{fpath}/spectra')
     if not os.path.isdir(f'{fpath}/dark'):
         os.makedirs(f'{fpath}/dark')
+
+    # Add file handler to logger (after fpath is known)
+    f_handler = logging.FileHandler(f'{fpath}/log.txt')
+    f_handler.setLevel(logging.INFO)
+    f_formatter = logging.Formatter('%(asctime)s - %(message)s', '%H:%M:%S')
+    f_handler.setFormatter(f_formatter)
+    logger.addHandler(f_handler)
 
 
     # Read in settings
@@ -243,54 +323,35 @@ def run():
 
     int_time_grid = list(range(min_it, max_it + 1, it_step))
 
-    # --- Acquire or load darks on boot ---
-    DARK_DIR = Path(f'{fpath}/dark')   # persistent directory on the Pi
+# =============================================================================
+#   Acquire or load darks on boot (with status)
+# =============================================================================
+    dark_dir = Path(f'{fpath}/dark')
 
     try:
-        # Acquire fresh darks on startup (lens cap / shutter closed!)
+        send_status(mav_connection, "Dark acquisition start")
         dark_lib = acquire_startup_darks(
             spectro,
-            out_dir=DARK_DIR,
+            out_dir=dark_dir,
             times_ms=int_time_grid,
-            coadds=1   # exactly one dark per integration time (your request)
+            coadds=1   # one dark per integration time
         )
         logging.info("Startup dark acquisition complete at %s", int_time_grid)
+        send_status(mav_connection, "Dark acquisition done")
     except Exception as e:
         logging.exception("Dark acquisition failed: %s; trying to load existing index", e)
-        dark_lib = load_dark_library(spectro, DARK_DIR)
+        send_status(mav_connection, "Dark acquisition failed", mavutil.mavlink.MAV_SEVERITY_ERROR)
+        dark_lib = load_dark_library(spectro, dark_dir)
 
     if not getattr(dark_lib, "darks", None):
         logging.warning("Dark library is empty. Proceeding WITHOUT dark subtraction.")
+        send_status(mav_connection, "Dark lib empty", mavutil.mavlink.MAV_SEVERITY_WARNING)
     else:
         logging.info("Dark library contains %d entries.", len(dark_lib.darks))
-
-    # Connect to MAVLINK
-    connection_string = '/dev/serial0'
-    mav_connection = mavutil.mavlink_connection(
-        '/dev/serial0',
-        baud=115200,
-        source_system=1,
-        source_component=0
-    )
-
-    # Start heartbeat thread
-    hb_thread = threading.Thread(
-        target=heartbeat_thread,
-        name='HB_thread',
-        args=(mav_connection, 5, ),
-        daemon=True
-    )
-
-
-    # Add file handler to logger
-    f_handler = logging.FileHandler(f'{fpath}/log.txt')
-    f_handler.setLevel(logging.INFO)
-    f_formatter = logging.Formatter('%(asctime)s - %(message)s', '%H:%M:%S')
-    f_handler.setFormatter(f_formatter)
-    logger.addHandler(f_handler)
+        send_status(mav_connection, f"Darks ready: {len(dark_lib.darks)}")
 
     # Initialise a process list
-    processes = []
+    # processes = []
 
 # =============================================================================
 #   Set up iFit analyser
@@ -327,7 +388,7 @@ def run():
     listen1.daemon = True
     listen1.start()
 
-    # Generate the mavlink queue
+    # Generate the mavlink queue (keeps your float sending intact)
     q2 = Queue()
     listen2 = Process(target=mavlink_listener, args=[q2, mav_connection])
     listen2.daemon = True
@@ -339,25 +400,28 @@ def run():
         os.remove(control_file)
 
     logger.info('PiSpec ready!')
+    send_status(mav_connection, "PiSpec running")
 
+    acquiring_announced = False
+
+    
     while True:
-
-        # Get the status
-        # if not os.path.isfile(control_file):
-        #     time.sleep(1)
-        #     continue
-
         try:
-
             # Format the spectrum name and read
             spec_fname = f'{fpath}/spectra/spectrum_{i:05d}.txt'
-            [x, y], info = spectro.get_spectrum(spec_fname, gps=gps)
+            try:
+                [x, y], info = spectro.get_spectrum(spec_fname, gps=gps)
+            except Exception as e:
+                logger.exception("Spectrometer read failed: %s", e)
+                send_status(mav_connection, "Spectrometer read failed", mavutil.mavlink.MAV_SEVERITY_ERROR)
+                time.sleep(0.5)
+                continue
 
             # Find the maximum intensity
             max_int = np.max(y)
 
             # Scale the intensity to the target
-            scale = target_int / max_int
+            scale = target_int / max_int if max_int > 0 else 1.0
 
             # Scale the integration time by this factor
             int_time = spectro.integration_time * scale
@@ -370,41 +434,39 @@ def run():
             # Update the integration time
             if new_int_time != spectro.integration_time:
                 spectro.update_integration_time(new_int_time)
+                send_status(mav_connection, f"IntTime -> {new_int_time} ms")
 
             # Clear any finished processes from the processes list
-            processes = [p for p in processes if p.is_alive()]
-
-            if len(processes) < 1:
-
-                # Create new process to handle fitting of the last scan
+            try:
                 p = Process(
                     target=analyse_spec,
                     args=[spec_fname, analyser, fpath, q1, q2]
                 )
-
-                # Add to array of active processes
-                processes.append(p)
-
-                # Begin the process
+                p.daemon = True
                 p.start()
-
-            else:
-                # Log that the process was not started
-                logger.warning(f'Too many processes! Spectrum {i} not analysed')
+                if not acquiring_announced:
+                    send_status(mav_connection, "Acquiring spectra")
+                    acquiring_announced = True
+            except Exception as e:
+                logger.exception("Analysis start failed: %s", e)
+                send_status(mav_connection, "Analysis start failed", mavutil.mavlink.MAV_SEVERITY_ERROR)
 
             i += 1
 
         except KeyboardInterrupt:
             q1.put('kill')
+            send_status(mav_connection, "PiSpec stopping", mavutil.mavlink.MAV_SEVERITY_WARNING)
             break
+        except Exception as e:
+            logger.exception("Unhandled loop error: %s", e)
+            send_status(mav_connection, "Unhandled error", mavutil.mavlink.MAV_SEVERITY_ERROR)
+            time.sleep(0.5)
 
     logger.info('Program ended')
 
     # Complete processes
     listen1.join()
     listen2.join()
-    for p in processes:
-        p.join()
 
 
 if __name__ == '__main__':
