@@ -134,7 +134,7 @@ class Spectrometer():
             else:
                 timestamp = datetime.combine(gps.datestamp, gps.timestamp)
         else:
-            timestamp = datetime.now()
+            timestamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S-%f")[:-3]
 
         # Get the spectrum position, if available
         if gps is not None:

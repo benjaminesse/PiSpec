@@ -105,7 +105,7 @@ class DarkLibrary:
 
                     if save_csv:
                         # Timestamp for file naming
-                        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        timestamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S-%f")[:-3]
 
                         fname = self.root / f"{timestamp}_dark_{int(it)}ms.csv"
                         header = (
