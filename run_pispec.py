@@ -345,10 +345,10 @@ def run():
 
     if not getattr(dark_lib, "darks", None):
         logging.warning("Dark library is empty. Proceeding WITHOUT dark subtraction.")
-        send_status(mav_connection, "Dark lib empty", mavutil.mavlink.MAV_SEVERITY_WARNING)
+        # send_status(mav_connection, "Dark lib empty", mavutil.mavlink.MAV_SEVERITY_WARNING)
     else:
         logging.info("Dark library contains %d entries.", len(dark_lib.darks))
-        send_status(mav_connection, f"Darks ready: {len(dark_lib.darks)}")
+        # send_status(mav_connection, f"Darks ready: {len(dark_lib.darks)}")
 
     # Initialise a process list
     # processes = []
@@ -434,7 +434,7 @@ def run():
             # Update the integration time
             if new_int_time != spectro.integration_time:
                 spectro.update_integration_time(new_int_time)
-                send_status(mav_connection, f"IntTime -> {new_int_time} ms")
+                # send_status(mav_connection, f"IntTime -> {new_int_time} ms")
 
             # Clear any finished processes from the processes list
             try:

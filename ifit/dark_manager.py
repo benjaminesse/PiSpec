@@ -105,14 +105,14 @@ class DarkLibrary:
 
                     if save_csv:
                         # Timestamp for file naming
-                        timestamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+                        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
                         fname = self.root / f"{timestamp}_dark_{int(it)}ms.csv"
                         header = (
                             "PiSpec Dark Spectrum\n"
-                            f"DateTime: {timestamp}\n"
-                            f"Integration time (ms): {int(it)}\n"
-                            f"Pixels: {getattr(spectro, 'pixels', len(wl))}\n"
+                            f"timestamp; {timestamp}\n"
+                            f"integration_time; {int(it)}\n"
+                            f"Pixels; {getattr(spectro, 'pixels', len(wl))}\n"
                             "Wavelength (nm),Intensity (arb)"
                         )
                         np.savetxt(fname, np.column_stack([wl, y]), delimiter=",", header=header)
