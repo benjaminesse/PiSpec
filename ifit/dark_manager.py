@@ -110,8 +110,11 @@ class DarkLibrary:
                         fname = self.root / f"{timestamp}_dark_{int(it)}ms.csv"
                         header = (
                             "PiSpec Dark Spectrum\n"
+                            f"serial_number; {spectro.serial_number}\n"
+                            f"spectrum_number;{spectro.spec_no}\n"
                             f"timestamp; {timestamp}\n"
                             f"integration_time; {int(it)}\n"
+                            f"coadds; {spectro.coadds}\n"
                             f"Pixels; {getattr(spectro, 'pixels', len(wl))}\n"
                             "Wavelength (nm),Intensity (arb)"
                         )
