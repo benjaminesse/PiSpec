@@ -33,13 +33,13 @@ logger.addHandler(handler)
 # =============================================================================
 
 # Main file path to spectra
-fpath = r'c:\Users\w04272ar\OneDrive - The University of Manchester\UOM PhD\2026_01_Guatemala\PiSpec\Example PiSpec Results\20251209_162118\spectra'
+fpath = r'c:\Users\w04272ar\OneDrive - The University of Manchester\UOM PhD\2026_01_Guatemala\PiSpec\Example PiSpec Results\20251210_094703\spectra'
 
 # Dark spectra path
-dpath = r"c:\Users\w04272ar\OneDrive - The University of Manchester\UOM PhD\2026_01_Guatemala\PiSpec\Example PiSpec Results\20251209_162118\dark"
+dpath = r"c:\Users\w04272ar\OneDrive - The University of Manchester\UOM PhD\2026_01_Guatemala\PiSpec\Example PiSpec Results\20251210_094703\dark"
 
 # Set the location to save the spectra
-save_path = r'C:\Users\w04272ar\OneDrive - The University of Manchester\UOM PhD\2026_01_Guatemala\PiSpec\Example PiSpec Results\20251209_162118\ifit_results.csv'
+save_path = r'C:\Users\w04272ar\OneDrive - The University of Manchester\UOM PhD\2026_01_Guatemala\PiSpec\Example PiSpec Results\20251210_094703\ifit_results.csv'
 
 # Set the spectra type
 spec_type = 'iFit'
@@ -305,7 +305,7 @@ with open(save_path, 'w') as w:
         )
 
         # Write the results to the CSV
-        w.write(f'{i},{spec_info["timestamp"]},')
+        w.write(f'{i},{spec_info["timestamp"].strftime("%Y-%m-%dT%H-%M-%S-%f")[:-3]},')
 
         for par in fit.params.values():
             w.write(f'{par.fit_val},{par.fit_err},')
