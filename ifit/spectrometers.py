@@ -3,7 +3,7 @@ import os
 import time
 import logging
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 
 try:
     import seabreeze.spectrometers as sb
@@ -126,15 +126,36 @@ class Spectrometer():
         # Average the coadded spectra
         y = np.average(y_arr, axis=0)
 
-        # Get the spectrum timestamp
-        if gps is not None:
-            if gps.datestamp is None or gps.timestamp is None:
-                timestamp = datetime.now()
-                logger.warning('No GPS, using system time')
-            else:
-                timestamp = datetime.combine(gps.datestamp, gps.timestamp)
+        # ------------------------------------------------------------------
+        # Get timestamp with GPS seconds (only second resolution) + system microseconds 
+        #could have used system time only as wont run without  GPS initially and this builds the system time
+        # but this way we are confident in the timestamp
+        # ------------------------------------------------------------------
+        system_now = datetime.now()
+
+        if gps is not None and gps.datestamp is not None and gps.timestamp is not None:
+            # Base on GPS date+time (to nearest second)
+            dt_base = datetime.combine(gps.datestamp, gps.timestamp)
+            # Inject high-resolution microseconds from system clock
+            dt = dt_base.replace(microsecond=system_now.microsecond)
         else:
-            timestamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S-%f")[:-3]
+            # No reliable GPS time -> just use system time
+            dt = system_now
+            if gps is not None:
+                logger.warning('No GPS time available, using system time')
+
+        # Ensure timestamps are strictly increasing if we take spectra very fast
+        if not hasattr(self, "_last_dt"):
+            self._last_dt = None
+
+        if self._last_dt is not None and dt <= self._last_dt:
+            # Bump by 1 ms if time stands still or goes backwards
+            dt = self._last_dt + timedelta(milliseconds=1)
+
+        self._last_dt = dt
+
+        # Format with milliseconds, e.g. 2024-07-15T10-32-45-123
+        timestamp = dt.strftime("%Y-%m-%dT%H-%M-%S-%f")[:-3]
 
         # Get the spectrum position, if available
         if gps is not None:

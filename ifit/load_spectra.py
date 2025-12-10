@@ -57,7 +57,7 @@ def read_spectrum(fname, spec_type='iFit', wl_calib_file=None,
                      'serial_number': '',
                      'integration_time': -1,
                      'coadds': -1,
-                     'timestamp': datetime(2000, 1, 1, 12, 0, 0),
+                     'timestamp': datetime(2000, 1, 1, 12, 0, 0, 0),
                      'elecdk_correction': False,
                      'nonlin_correction': False,
                      'lat': np.nan,
@@ -322,7 +322,7 @@ def load_ifit(*args):
                 try:
                     ts = datetime.strptime(value, '%Y-%m-%d %H:%M:%S.%f')
                 except ValueError:
-                    ts = datetime.strptime(value, '%Y-%m-%d %H:%M:%S')
+                    ts = datetime.strptime(value, "%Y-%m-%dT%H-%M-%S-%f")
                 metadata[key] = ts
             else:
                 metadata[key] = value
