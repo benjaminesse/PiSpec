@@ -322,7 +322,7 @@ def load_ifit(*args):
                 try:
                     ts = datetime.strptime(value, '%Y-%m-%d %H:%M:%S.%f')
                 except ValueError:
-                    ts = datetime.strptime(value, "%Y-%m-%dT%H-%M-%S-%f")
+                    ts = datetime.strptime(value, "%Y-%m-%dT%H-%M-%S.%f")
                 metadata[key] = ts
             else:
                 metadata[key] = value

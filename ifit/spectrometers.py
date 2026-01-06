@@ -155,7 +155,7 @@ class Spectrometer():
         self._last_dt = dt
 
         # Format with milliseconds, e.g. 2024-07-15T10-32-45-123
-        timestamp = dt.strftime("%Y-%m-%dT%H-%M-%S-%f")[:-3]
+        timestamp = dt.strftime("%Y-%m-%dT%H-%M-%S.%f")
 
         # Get the spectrum position, if available
         if gps is not None:
